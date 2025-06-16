@@ -1,0 +1,167 @@
+---
+title: "Random Forest"
+output: html_document
+date: "2025-04-10"
+---
+
+```{r}
+# OPCION A
+
+# Visualización de métricas por umbral
+library(rlang)
+
+# Umbrales a probar
+umbrales <- seq(0.3, 0.7, by = 0.05)
+
+# Tabla para guardar resultados
+resultados_rf <- data.frame()
+
+for (umbral in umbrales) {
+  col <- paste0("pred_", gsub("\\.", "", as.character(umbral)))
+  pred_rf[[col]] <- factor(ifelse(pred_rf$.pred_1 >= umbral, "1", "0"), levels = c("0", "1"))
+  
+  met <- metric_set(accuracy, recall, precision, f_meas)(
+    data = pred_rf,
+    truth = MARCA_IMP90_12,
+    estimate = !!sym(col)
+  )
+  
+  met$umbral <- umbral
+  resultados_rf <- bind_rows(resultados_rf, met)
+}
+
+# Gráfico de evolución de métricas
+ggplot(resultados_rf, aes(x = umbral, y = .estimate, color = .metric)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  labs(
+    title = "Evolución de métricas por umbral - Random Forest",
+    x = "Umbral de decisión",
+    y = "Valor de la métrica",
+    color = "Métrica"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+```{r}
+# Aplicar umbral 0.60
+pred_rf$pred_060 <- factor(ifelse(pred_rf$.pred_1 >= 0.60, "1", "0"), levels = c("0", "1"))
+
+# Métricas finales
+metric_set(accuracy, recall, precision, f_meas, roc_auc)(
+  data = pred_rf,
+  truth = MARCA_IMP90_12,
+  estimate = pred_060,
+  .pred_1
+)
+
+# Matriz de confusión visual
+matriz_rf_060 <- conf_mat(pred_rf, truth = MARCA_IMP90_12, estimate = pred_060)
+df_matriz_rf_060 <- as_tibble(matriz_rf_060$table)
+
+ggplot(df_matriz_rf_060, aes(x = Prediction, y = Truth, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n), size = 6, fontface = "bold", color = "black") +
+  scale_fill_gradient(low = "white", high = "#2171b5") +
+  labs(
+    title = "Matriz de confusión - Random Forest (Opción A, umbral 0.60)",
+    x = "Predicción del modelo",
+    y = "Valor real"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Curva ROC
+roc_rf <- roc_curve(pred_rf, truth = MARCA_IMP90_12, .pred_1)
+
+autoplot(roc_rf) +
+  labs(title = "Curva ROC - Random Forest (Opción A)") +
+  annotate("text", x = 0.6, y = 0.1,
+           label = paste0("AUC = ", round(
+             roc_auc(pred_rf, truth = MARCA_IMP90_12, .pred_1)$.estimate, 5)),
+           fontface = "bold")
+
+```
+
+
+```{r}
+# OPCIÓN B (SMOTE antes del split)
+
+# Cargar librerías necesarias
+library(ggplot2)
+library(dplyr)
+library(yardstick)
+library(purrr)
+library(tibble)
+
+# Secuencia de umbrales a probar
+umbrales <- seq(0.3, 0.7, by = 0.05)
+
+# Calcular métricas para cada umbral
+metricas_por_umbral_rf_b <- map_dfr(umbrales, function(umbral) {
+  data_tmp <- pred_test_rf_b %>%
+    mutate(pred_clase = factor(ifelse(.pred_1 >= umbral, "1", "0"), levels = c("0", "1")))
+  
+  met <- metric_set(accuracy, recall, precision, f_meas)
+  met(data_tmp, truth = MARCA_IMP90_12, estimate = pred_clase) %>%
+    mutate(umbral = umbral)
+})
+
+# Mostrar tabla ordenada
+metricas_por_umbral_rf_b %>%
+  tidyr::pivot_wider(names_from = .metric, values_from = .estimate) %>%
+  arrange(desc(f_meas))
+
+# Gráfico de evolución de métricas
+ggplot(metricas_por_umbral_rf_b, aes(x = umbral, y = .estimate, color = .metric)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  labs(
+    title = "Evolución de métricas por umbral - Random Forest SMOTE (opción B)",
+    x = "Umbral de decisión",
+    y = "Valor de la métrica",
+    color = "Métrica"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+```{r}
+# Aplicar umbral 0.60, 
+pred_test_rf_b$pred_060 <- factor(ifelse(pred_test_rf_b$.pred_1 >= 0.60, "1", "0"), levels = c("0", "1"))
+
+# Métricas finales con umbral 0.60
+metric_set(accuracy, recall, precision, f_meas, roc_auc)(
+  data = pred_test_rf_b,
+  truth = MARCA_IMP90_12,
+  estimate = pred_060,
+  .pred_1
+)
+
+# Matriz de confusión
+matriz_rf_b_060 <- conf_mat(pred_test_rf_b, truth = MARCA_IMP90_12, estimate = pred_060)
+df_matriz_rf_b_060 <- as_tibble(matriz_rf_b_060$table)
+
+ggplot(df_matriz_rf_b_060, aes(x = Prediction, y = Truth, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n), size = 6, fontface = "bold", color = "black") +
+  scale_fill_gradient(low = "white", high = "#2171b5") +
+  labs(
+    title = "Matriz de confusión - Random Forest SMOTE (opción B, umbral 0.60)",
+    x = "Predicción del modelo",
+    y = "Valor real"
+  ) +
+  theme_minimal(base_size = 14)
+
+# Curva ROC
+roc_rf_b <- roc_curve(pred_test_rf_b, truth = MARCA_IMP90_12, .pred_1)
+
+autoplot(roc_rf_b) +
+  labs(title = "Curva ROC - Random Forest SMOTE (opción B)") +
+  annotate("text", x = 0.6, y = 0.1,
+           label = paste0("AUC = ", round(
+             roc_auc(pred_test_rf_b, truth = MARCA_IMP90_12, .pred_1)$.estimate, 3)),
+           fontface = "bold")
+
+```
+

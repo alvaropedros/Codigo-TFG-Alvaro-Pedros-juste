@@ -1,0 +1,252 @@
+---
+title: "Regresión Logisitca"
+output: html_document
+date: "2025-03-09"
+---
+
+```{r}
+# OPCIÓN A
+
+# CARGA DE PAQUETES
+library(tidymodels)
+library(themis)
+library(dplyr)
+library(ggplot2)
+library(tibble)
+
+# CARGAR Y PREPARAR LOS DATOS
+datos <- readRDS("C:/Users/Alvaro/OneDrive/UFV/TFG/BBDD_Alvaro_Pedros_var35.rds")
+datos$MARCA_IMP90_12 <- as.factor(datos$MARCA_IMP90_12)
+
+set.seed(123)
+split <- initial_split(datos, prop = 0.8, strata = MARCA_IMP90_12)
+train <- training(split)
+test <- testing(split)
+
+# RECETA CON SMOTE SOBRE TRAIN
+receta_log <- recipe(MARCA_IMP90_12 ~ ., data = train) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_smote(MARCA_IMP90_12)
+
+# MODELO DE REGRESIÓN LOGÍSTICA
+modelo_log <- logistic_reg() %>% set_engine("glm")
+
+# WORKFLOW
+workflow_log <- workflow() %>%
+  add_model(modelo_log) %>%
+  add_recipe(receta_log)
+
+# VALIDACIÓN CRUZADA
+set.seed(123)
+cv_folds <- vfold_cv(train, v = 5, strata = MARCA_IMP90_12)
+
+# ENTRENAMIENTO CON VALIDACIÓN CRUZADA
+res_log <- fit_resamples(
+  workflow_log,
+  resamples = cv_folds,
+  metrics = metric_set(accuracy, recall, precision, f_meas, roc_auc),
+  control = control_resamples(save_pred = TRUE)
+)
+
+# RESULTADOS DE VALIDACIÓN CRUZADA
+collect_metrics(res_log)
+
+# ENTRENAR MODELO FINAL SOBRE TRAIN
+modelo_final_log <- fit(workflow_log, data = train)
+
+# PREDICCIONES SOBRE TEST (probabilidades)
+pred_test_log <- predict(modelo_final_log, new_data = test, type = "prob") %>%
+  bind_cols(predict(modelo_final_log, new_data = test)) %>%
+  bind_cols(test %>% select(MARCA_IMP90_12))
+
+# EVALUACIÓN DE MÉTRICAS POR UMBRAL
+umbrales <- seq(0.3, 0.7, by = 0.05)
+resultados_log <- data.frame()
+
+for (umbral in umbrales) {
+  col <- paste0("pred_", gsub("\\.", "", as.character(umbral)))
+  pred_test_log[[col]] <- factor(ifelse(pred_test_log$.pred_1 >= umbral, "1", "0"), levels = c("0", "1"))
+  
+  met <- metric_set(accuracy, recall, precision, f_meas)(
+    data = pred_test_log,
+    truth = MARCA_IMP90_12,
+    estimate = !!sym(col)
+  )
+  
+  met$umbral <- umbral
+  resultados_log <- bind_rows(resultados_log, met)
+}
+
+# VISUALIZACIÓN DEL GRÁFICO DE MÉTRICAS POR UMBRAL
+ggplot(resultados_log, aes(x = umbral, y = .estimate, color = .metric)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  labs(
+    title = "Evolución de métricas por umbral - Regresión Logística con SMOTE",
+    x = "Umbral de decisión", y = "Valor de la métrica",
+    color = "Métrica"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+```{r}
+
+# Evaluación final sobre test con el umbral óptimo (0.70)
+
+# APLICAR UMBRAL SELECCIONADO (0.70)
+pred_test_log$pred_070 <- factor(ifelse(pred_test_log$.pred_1 >= 0.70, "1", "0"), levels = c("0", "1"))
+
+# MÉTRICAS CON UMBRAL 0.70
+metric_set(accuracy, recall, precision, f_meas, roc_auc)(
+  data = pred_test_log,
+  truth = MARCA_IMP90_12,
+  estimate = pred_070,
+  .pred_1
+)
+
+# MATRIZ DE CONFUSIÓN VISUAL
+matriz_log_070 <- conf_mat(pred_test_log, truth = MARCA_IMP90_12, estimate = pred_070)
+df_matriz_log_070 <- as_tibble(matriz_log_070$table)
+
+ggplot(df_matriz_log_070, aes(x = Prediction, y = Truth, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n), size = 6, fontface = "bold", color = "black") +
+  scale_fill_gradient(low = "white", high = "#2171b5") +
+  labs(
+    title = "Matriz de confusión - Regresión Logística con SMOTE (umbral 0.70)",
+    x = "Predicción del modelo", y = "Valor real"
+  ) +
+  theme_minimal(base_size = 14)
+
+# CURVA ROC FINAL
+roc_log <- roc_curve(pred_test_log, truth = MARCA_IMP90_12, .pred_1)
+
+autoplot(roc_log) +
+  labs(title = "Curva ROC - Regresión Logística con SMOTE (test original)") +
+  annotate("text", x = 0.6, y = 0.1,
+           label = paste0("AUC = ", round(
+             roc_auc(pred_test_log, truth = MARCA_IMP90_12, .pred_1)$.estimate, 3)),
+           fontface = "bold")
+
+```
+
+
+
+```{r}
+# OPCIÓN B
+
+# CARGAR PAQUETES
+library(tidymodels)
+library(themis)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+
+# CARGAR Y PREPARAR LOS DATOS
+datos <- readRDS("C:/Users/Alvaro/OneDrive/UFV/TFG/BBDD_Alvaro_Pedros_var35.rds")
+datos$MARCA_IMP90_12 <- as.factor(datos$MARCA_IMP90_12)
+
+# APLICAR SMOTE A TODO EL CONJUNTO
+receta_b_log <- recipe(MARCA_IMP90_12 ~ ., data = datos) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_smote(MARCA_IMP90_12)
+
+receta_b_prep_log <- prep(receta_b_log)
+datos_balanceados <- bake(receta_b_prep_log, new_data = NULL)
+
+# DIVISIÓN TRAIN/TEST (después de SMOTE)
+set.seed(123)
+split_b <- initial_split(datos_balanceados, prop = 0.8, strata = MARCA_IMP90_12)
+train_b <- training(split_b)
+test_b <- testing(split_b)
+
+# MODELO Y WORKFLOW
+modelo_log_b <- logistic_reg() %>% set_engine("glm")
+workflow_log_b <- workflow() %>%
+  add_model(modelo_log_b) %>%
+  add_formula(MARCA_IMP90_12 ~ .)
+
+# ENTRENAR MODELO SOBRE EL TRAIN BALANCEADO
+modelo_final_log_b <- fit(workflow_log_b, data = train_b)
+
+# PREDICCIONES SOBRE TEST
+pred_log_b <- predict(modelo_final_log_b, new_data = test_b, type = "prob") %>%
+  bind_cols(predict(modelo_final_log_b, new_data = test_b)) %>%
+  bind_cols(test_b %>% select(MARCA_IMP90_12))
+
+# EVALUACIÓN DE MÉTRICAS POR UMBRAL
+umbrales <- seq(0.3, 0.7, by = 0.05)
+resultados_log_b <- data.frame()
+
+for (umbral in umbrales) {
+  col <- paste0("pred_", gsub("\\.", "", as.character(umbral)))
+  pred_log_b[[col]] <- factor(ifelse(pred_log_b$.pred_1 >= umbral, "1", "0"), levels = c("0", "1"))
+  
+  met <- metric_set(accuracy, recall, precision, f_meas)(
+    data = pred_log_b,
+    truth = MARCA_IMP90_12,
+    estimate = !!sym(col)
+  )
+  
+  met$umbral <- umbral
+  resultados_log_b <- bind_rows(resultados_log_b, met)
+}
+
+# VISUALIZAR GRÁFICO DE MÉTRICAS POR UMBRAL
+ggplot(resultados_log_b, aes(x = umbral, y = .estimate, color = .metric)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  labs(
+    title = "Evolución de métricas por umbral - Regresión Logística (Opción B)",
+    x = "Umbral de decisión",
+    y = "Valor de la métrica",
+    color = "Métrica"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+```{r}
+# OPCIÓN B - Parte 2: Evaluación final sobre test con umbral 0.70
+
+# APLICAR UMBRAL SELECCIONADO
+pred_log_b$pred_070 <- factor(ifelse(pred_log_b$.pred_1 >= 0.70, "1", "0"), levels = c("0", "1"))
+
+# MÉTRICAS FINALES CON UMBRAL 0.70
+metric_set(accuracy, recall, precision, f_meas, roc_auc)(
+  data = pred_log_b,
+  truth = MARCA_IMP90_12,
+  estimate = pred_070,
+  .pred_1
+)
+
+# MATRIZ DE CONFUSIÓN
+matriz_b_log <- conf_mat(pred_log_b, truth = MARCA_IMP90_12, estimate = pred_070)
+df_matriz_b_log <- as_tibble(matriz_b_log$table)
+
+ggplot(df_matriz_b_log, aes(x = Prediction, y = Truth, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n), size = 6, fontface = "bold", color = "black") +
+  scale_fill_gradient(low = "white", high = "#2171b5") +
+  labs(
+    title = "Matriz de confusión - Regresión Logística (Opción B, umbral 0.70)",
+    x = "Predicción del modelo",
+    y = "Valor real"
+  ) +
+  theme_minimal(base_size = 14)
+
+# CURVA ROC
+roc_b_log <- roc_curve(pred_log_b, truth = MARCA_IMP90_12, .pred_1)
+
+autoplot(roc_b_log) +
+  labs(title = "Curva ROC - Regresión Logística") +
+  annotate("text", x = 0.6, y = 0.1,
+           label = paste0("AUC = ", round(
+             roc_auc(pred_log_b, truth = MARCA_IMP90_12, .pred_1)$.estimate, 3)),
+           fontface = "bold")
+
+```
+

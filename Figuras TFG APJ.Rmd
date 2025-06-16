@@ -1,0 +1,177 @@
+---
+title: "TFG APJ"
+output: html_document
+date: "2025-03-14"
+---
+
+
+```{r}
+# Cargar librerías necesarias
+library(tidyverse)
+library(corrr)
+library(reshape2)
+
+# Cargar base de datos
+datos <- readRDS("C:/Users/Alvaro/OneDrive/UFV/TFG/BBDD_Alvaro_Pedros_var35.rds")
+
+# Asegurar de que MARCA_IMP90_12 sea numérica
+datos <- datos %>%
+  mutate(MARCA_IMP90_12 = as.numeric(as.character(MARCA_IMP90_12)))
+
+# Calcular la matriz de correlaciones con corrr
+cor_matrix <- datos %>%
+  select_if(is.numeric) %>%
+  correlate(method = "pearson")
+
+# Extraer las 35 variables más correlacionadas con MARCA_IMP90_12
+cor_target <- cor_matrix %>%
+  focus(MARCA_IMP90_12) %>%
+  mutate(abs_cor = abs(MARCA_IMP90_12)) %>%
+  arrange(desc(abs_cor)) %>%
+  slice(1:35)
+
+# GRÁFICO DE BARRAS
+ggplot(cor_target, aes(x = reorder(term, MARCA_IMP90_12), y = MARCA_IMP90_12)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Correlación de las variables con MARCA_IMP90_12",
+       x = "Variable",
+       y = "Correlación") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8, hjust = 1))
+
+# MATRIZ DE CORRELACIÓN PARA ESAS 35 VARIABLES
+top_vars <- cor_target$term
+top_vars <- c(top_vars, "MARCA_IMP90_12")  # Incluir la variable objetivo también
+
+datos_filtrados <- datos %>% select(all_of(top_vars))
+
+# Calcular la matriz de correlaciones como matriz tradicional
+matriz_cor <- round(cor(datos_filtrados, use = "pairwise.complete.obs"), 2)
+
+# Transformar a formato largo
+cor_df <- melt(matriz_cor)
+
+ggsave("C:/Users/Alvaro/OneDrive/UFV/TFG/grafico_barras_correlacion.png",
+       width = 10, height = 7, dpi = 300)
+
+
+# MAPA DE CALOR
+ggplot(cor_df, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "darkred", high = "darkblue", mid = "white",
+                       midpoint = 0, limit = c(-1, 1), space = "Lab",
+                       name = "Correlación") +
+theme_minimal() +
+theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 7),
+      axis.text.y = element_text(size = 7)) +
+  labs(title = "Mapa de calor de correlaciones entre las variables seleccionadas",
+       x = "", y = "")
+
+ggsave("C:/Users/Alvaro/OneDrive/UFV/TFG/mapa_calor_correlaciones.png",
+       width = 10, height = 8, dpi = 300)
+
+
+```
+
+
+```{r}
+
+datos$MARCA_IMP90_12 <- as.factor(datos$MARCA_IMP90_12)
+
+# Gráfico de densidad
+library(ggplot2)
+
+ggplot(datos, aes(x = sint_ahor_cuota_act, fill = MARCA_IMP90_12)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Densidad de sint_ahor_cuota_act según MARCA_IMP90_12",
+       x = "sint_ahor_cuota_act",
+       y = "Densidad",
+       fill = "Impago") +
+  theme_minimal()
+# Guardar el primer gráfico
+ggsave("densidad_sint_ahor_cuota_act_completo.png", plot = g1, width = 8, height = 5)
+
+# Crear gráfico de densidad limitado hasta x = 75
+ggplot(datos, aes(x = sint_ahor_cuota_act, fill = MARCA_IMP90_12)) +
+  geom_density(alpha = 0.4) +
+  coord_cartesian(xlim = c(0, 75)) +
+  labs(
+    title = "Densidad de sint_ahor_cuota_act según MARCA_IMP90_12 (Recortada)",
+    x = "sint_ahor_cuota_act",
+    y = "Densidad",
+    fill = "Impago (1) / No impago (0)"
+  ) +
+  theme_minimal()
+# Guardar el segundo gráfico
+ggsave("densidad_sint_ahor_cuota_act_75.png", plot = g2, width = 8, height = 5)
+```
+
+
+```{r}
+
+# SHAP sobre modelo final: XGBoost Opcion B
+# Paso 1: Cargar librerías necesarias
+library(fastshap)
+library(tidymodels)
+library(dplyr)
+library(ggplot2)
+
+# Paso 2: Extraer el modelo puro del workflow
+modelo_entrenado <- extract_fit_parsnip(xgb_fit_b)$fit
+
+# Paso 3: Seleccionar muestra de test sin la variable objetivo
+test_sample <- test_b %>% select(-MARCA_IMP90_12) %>% slice_sample(n = 200)
+
+# Paso 4: Convertir la muestra a matriz
+test_matrix <- as.matrix(test_sample)
+
+# Paso 5: Definir función de predicción compatible
+pred_xgb <- function(object, newdata) {
+  predict(object, newdata)
+}
+
+# Paso 6: Calcular valores SHAP
+shap_values <- explain(
+  object = modelo_entrenado,
+  X = test_matrix,
+  pred_wrapper = pred_xgb,
+  nsim = 100
+)
+
+# Paso 7: Calcular importancia media absoluta de cada variable
+importancia_shap <- as.data.frame(shap_values) %>%
+  summarise(across(everything(), ~mean(abs(.), na.rm = TRUE))) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Importancia") %>%
+  arrange(desc(Importancia))
+
+
+# Crear el gráfico
+grafico_shap <- importancia_shap %>%
+  top_n(20, Importancia) %>%  # Opcional: mostrar solo las 20 más relevantes
+  ggplot(aes(x = reorder(Variable, Importancia), y = Importancia)) +
+  geom_col(fill = "#0073C2FF") +
+  coord_flip() +
+  geom_text(aes(label = round(Importancia, 3)), hjust = -0.1, size = 3.5) +
+  labs(
+    title = "Importancia de variables según SHAP – XGBoost (Opción B)",
+    x = "Variable",
+    y = "Importancia media absoluta"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.y = element_text(face = "bold")
+  ) +
+  ylim(0, max(importancia_shap$Importancia) * 1.15)
+
+# Mostrar gráfico en RStudio
+print(grafico_shap)
+
+# Guardar en carpeta TFG
+ggsave("C:/Users/Alvaro/OneDrive/UFV/TFG/SHAP_XGBoost_OpcionB.png", plot = grafico_shap,
+       width = 10, height = 6, dpi = 300)
+
+
+```
+

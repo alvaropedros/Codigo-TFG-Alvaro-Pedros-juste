@@ -1,0 +1,491 @@
+---
+title: "XGBoost"
+output: html_document
+date: "2025-03-22"
+---
+
+```{r}
+# CARGAR PAQUETES
+library(tidymodels)
+library(themis)
+library(dplyr)
+
+BBDD_Alvaro_Pedros_var35 <- readRDS("C:/Users/Alvaro/OneDrive/UFV/TFG/BBDD_Alvaro_Pedros_var35.rds")
+datos$MARCA_IMP90_12 <- as.factor(datos$MARCA_IMP90_12)
+
+# DIVISIÓN TRAIN/TEST CON ESTRATIFICACIÓN
+set.seed(123)
+split <- initial_split(datos, prop = 0.8, strata = MARCA_IMP90_12)
+train <- training(split)
+test <- testing(split)
+
+# CALCULAR PESO PARA CLASE MINORITARIA
+n_positivos <- sum(train$MARCA_IMP90_12 == "1")
+n_negativos <- sum(train$MARCA_IMP90_12 == "0")
+peso_clase <- n_negativos / n_positivos
+
+# RECETA DE PREPROCESAMIENTO
+receta <- recipe(MARCA_IMP90_12 ~ ., data = train) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+# MODELO XGBOOST CON scale_pos_weight
+modelo_xgb <- boost_tree(
+  trees = 1000,
+  learn_rate = 0.05,
+  tree_depth = 6
+) %>%
+  set_engine("xgboost", scale_pos_weight = peso_clase) %>%
+  set_mode("classification")
+
+# WORKFLOW COMPLETO
+workflow_xgb <- workflow() %>%
+  add_model(modelo_xgb) %>%
+  add_recipe(receta)
+
+# VALIDACIÓN CRUZADA
+set.seed(123)
+cv_folds <- vfold_cv(train, v = 5, strata = MARCA_IMP90_12)
+
+# MÉTRICAS A EVALUAR
+metricas <- metric_set(roc_auc, f_meas, recall, precision)
+
+# AJUSTE CON RESAMPLES
+resultado_xgb <- fit_resamples(
+  workflow_xgb,
+  resamples = cv_folds,
+  metrics = metricas,
+  control = control_resamples(save_pred = TRUE)
+)
+
+# MOSTRAR MÉTRICAS DE VALIDACIÓN CRUZADA
+collect_metrics(resultado_xgb)
+
+
+```
+
+```{r}
+# Entrenar el modelo final sobre TODO el train
+modelo_final_xgb <- fit(workflow_xgb, data = train)
+
+# Predecir probabilidades y clases en test
+pred_test <- predict(modelo_final_xgb, new_data = test, type = "prob") %>%
+  bind_cols(predict(modelo_final_xgb, new_data = test)) %>%
+  bind_cols(test %>% select(MARCA_IMP90_12))
+
+# Asegurar que las columnas son factor
+pred_test$MARCA_IMP90_12 <- as.factor(pred_test$MARCA_IMP90_12)
+pred_test$.pred_class <- as.factor(pred_test$.pred_class)
+
+# Calcular métricas sobre el conjunto de test
+metric_set(accuracy, recall, precision, f_meas, roc_auc)(
+  data = pred_test,
+  truth = MARCA_IMP90_12,
+  estimate = .pred_class,
+  .pred_1
+)
+
+library(ggplot2)
+library(tibble)
+
+matriz_test <- conf_mat(pred_test, truth = MARCA_IMP90_12, estimate = .pred_class)
+df_matriz <- as_tibble(matriz_test$table)
+
+ggplot(df_matriz, aes(x = Prediction, y = Truth, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n), size = 6, fontface = "bold", color = "black") +
+  scale_fill_gradient(low = "white", high = "#2171b5") +
+  labs(
+    title = "Matriz de confusión - XGBoost (test original)",
+    x = "Predicción del modelo",
+    y = "Valor real"
+  ) +
+  theme_minimal(base_size = 14)
+
+
+roc <- roc_curve(pred_test, truth = MARCA_IMP90_12, .pred_1)
+
+autoplot(roc) +
+  labs(title = "Curva ROC - XGBoost (test original)") +
+  annotate("text", x = 0.6, y = 0.1,
+           label = paste0("AUC = ", round(
+             roc_auc(pred_test, truth = MARCA_IMP90_12, .pred_1)$.estimate, 3)),
+           fontface = "bold")
+
+```
+
+```{r}
+library(tidymodels)
+library(ggplot2)
+library(dplyr)
+library(rlang)  # <- para sym()
+
+# Lista de umbrales
+umbrales <- seq(0.3, 0.7, by = 0.05)
+
+# Tabla para resultados
+resultados <- data.frame()
+
+# Iterar sobre umbrales
+for (umbral in umbrales) {
+  columna <- paste0("pred_", gsub("\\.", "", as.character(umbral)))
+  
+  # Crear columna de predicción como factor con niveles correctos
+  pred_test[[columna]] <- factor(ifelse(pred_test$.pred_1 >= umbral, "1", "0"), levels = c("0", "1"))
+  
+  # Calcular métricas usando evaluación no estándar
+  met <- metric_set(accuracy, recall, precision, f_meas)(
+    data = pred_test,
+    truth = MARCA_IMP90_12,
+    estimate = !!sym(columna)
+  )
+  
+  met$umbral <- umbral
+  resultados <- bind_rows(resultados, met)
+}
+
+# Tabla de métricas en formato ancho
+resultados_wide <- resultados %>%
+  select(umbral, .metric, .estimate) %>%
+  tidyr::pivot_wider(names_from = .metric, values_from = .estimate)
+
+print(resultados_wide)
+
+
+# Gráfico de evolución de métricas
+ggplot(resultados, aes(x = umbral, y = .estimate, color = .metric)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  labs(
+    title = "Evolución de métricas según umbral de decisión (XGBoost)",
+    x = "Umbral de decisión",
+    y = "Valor de la métrica",
+    color = "Métrica"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+```{r}
+# CARGAR PAQUETES
+library(tidymodels)
+library(themis)
+library(dplyr)
+
+# CARGAR DATOS
+BBDD_Alvaro_Pedros_var35 <- readRDS("C:/Users/Alvaro/OneDrive/UFV/TFG/BBDD_Alvaro_Pedros_var35.rds")
+datos$MARCA_IMP90_12 <- as.factor(datos$MARCA_IMP90_12)
+
+# DIVISIÓN TRAIN/TEST
+set.seed(123)
+split <- initial_split(datos, prop = 0.8, strata = MARCA_IMP90_12)
+train <- training(split)
+test <- testing(split)
+
+# RECETA CON SMOTE
+receta_smote <- recipe(MARCA_IMP90_12 ~ ., data = train) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_smote(MARCA_IMP90_12)
+
+# MODELO XGBoost SIN scale_pos_weight
+modelo_xgb_smote <- boost_tree(
+  trees = 1000,
+  learn_rate = 0.05,
+  tree_depth = 6
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+
+# WORKFLOW COMPLETO
+workflow_xgb_smote <- workflow() %>%
+  add_model(modelo_xgb_smote) %>%
+  add_recipe(receta_smote)
+
+# VALIDACIÓN CRUZADA
+set.seed(123)
+cv_folds <- vfold_cv(train, v = 5, strata = MARCA_IMP90_12)
+
+# MÉTRICAS A EVALUAR
+metricas <- metric_set(roc_auc, f_meas, recall, precision)
+
+# ENTRENAR CON VALIDACIÓN CRUZADA
+res_xgb_smote <- fit_resamples(
+  workflow_xgb_smote,
+  resamples = cv_folds,
+  metrics = metricas,
+  control = control_resamples(save_pred = TRUE)
+)
+
+# VER RESULTADOS
+collect_metrics(res_xgb_smote)
+
+```
+```{r}
+# ENTRENAR MODELO FINAL SOBRE TODO EL TRAIN (con SMOTE)
+modelo_final_smote <- fit(workflow_xgb_smote, data = train)
+
+# PREDECIR PROBABILIDADES Y CLASES SOBRE TEST
+pred_test_smote <- predict(modelo_final_smote, new_data = test, type = "prob") %>%
+  bind_cols(predict(modelo_final_smote, new_data = test)) %>%
+  bind_cols(test %>% select(MARCA_IMP90_12))
+
+# ASEGURAR FORMATO
+pred_test_smote$MARCA_IMP90_12 <- as.factor(pred_test_smote$MARCA_IMP90_12)
+pred_test_smote$.pred_class <- as.factor(pred_test_smote$.pred_class)
+
+# CALCULAR MÉTRICAS FINALES
+metric_set(accuracy, recall, precision, f_meas, roc_auc)(
+  data = pred_test_smote,
+  truth = MARCA_IMP90_12,
+  estimate = .pred_class,
+  .pred_1
+)
+
+library(ggplot2)
+library(tibble)
+
+matriz_conf <- conf_mat(pred_test_smote, truth = MARCA_IMP90_12, estimate = .pred_class)
+df_matriz <- as_tibble(matriz_conf$table)
+
+ggplot(df_matriz, aes(x = Prediction, y = Truth, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n), size = 6, fontface = "bold", color = "black") +
+  scale_fill_gradient(low = "white", high = "#2171b5") +
+  labs(
+    title = "Matriz de confusión - XGBoost con SMOTE (test original)",
+    x = "Predicción del modelo",
+    y = "Valor real"
+  ) +
+  theme_minimal(base_size = 14)
+
+roc_smote <- roc_curve(pred_test_smote, truth = MARCA_IMP90_12, .pred_1)
+
+autoplot(roc_smote) +
+  labs(title = "Curva ROC - XGBoost con SMOTE (test original)") +
+  annotate("text", x = 0.6, y = 0.1,
+           label = paste0("AUC = ", round(
+             roc_auc(pred_test_smote, truth = MARCA_IMP90_12, .pred_1)$.estimate, 3)),
+           fontface = "bold")
+
+```
+```{r}
+library(tidymodels)
+library(ggplot2)
+library(dplyr)
+library(rlang)
+
+# Umbrales a probar
+umbrales <- seq(0.3, 0.7, by = 0.05)
+
+# Tabla para guardar resultados
+resultados_smote <- data.frame()
+
+# Iterar por umbral
+for (umbral in umbrales) {
+  columna <- paste0("pred_", gsub("\\.", "", as.character(umbral)))
+  
+  # Crear columna de predicción binaria
+  pred_test_smote[[columna]] <- factor(ifelse(pred_test_smote$.pred_1 >= umbral, "1", "0"), levels = c("0", "1"))
+  
+  # Calcular métricas
+  met <- metric_set(accuracy, recall, precision, f_meas)(
+    data = pred_test_smote,
+    truth = MARCA_IMP90_12,
+    estimate = !!sym(columna)
+  )
+  
+  met$umbral <- umbral
+  resultados_smote <- bind_rows(resultados_smote, met)
+}
+
+# Tabla resumen
+tabla_smote <- resultados_smote %>%
+  select(umbral, .metric, .estimate) %>%
+  tidyr::pivot_wider(names_from = .metric, values_from = .estimate)
+
+print(tabla_smote)
+
+# Gráfico de evolución de métricas por umbral
+ggplot(resultados_smote, aes(x = umbral, y = .estimate, color = .metric)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  labs(
+    title = "Evolución de métricas por umbral (XGBoost con SMOTE)",
+    x = "Umbral de decisión",
+    y = "Valor de la métrica",
+    color = "Métrica"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+```{r}
+library(tidymodels)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+
+# 1. Entrenar modelo final sobre todo el conjunto de entrenamiento
+modelo_final_smote_ajustado <- fit(workflow_xgb_smote, data = train)
+
+# 2. Predecir probabilidades sobre test
+pred_test_smote <- predict(modelo_final_smote_ajustado, new_data = test, type = "prob") %>%
+  bind_cols(predict(modelo_final_smote_ajustado, new_data = test)) %>%
+  bind_cols(test %>% select(MARCA_IMP90_12))
+
+# 3. Aplicar umbral de 0.70
+pred_test_smote$pred_070 <- factor(ifelse(pred_test_smote$.pred_1 >= 0.70, "1", "0"), levels = c("0", "1"))
+
+# 4. Calcular métricas con umbral 0.70
+metric_set(accuracy, recall, precision, f_meas, roc_auc)(
+  data = pred_test_smote,
+  truth = MARCA_IMP90_12,
+  estimate = pred_070,
+  .pred_1
+)
+
+# 5. Matriz de confusión visual
+matriz_070 <- conf_mat(pred_test_smote, truth = MARCA_IMP90_12, estimate = pred_070)
+df_matriz_070 <- as_tibble(matriz_070$table)
+
+ggplot(df_matriz_070, aes(x = Prediction, y = Truth, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n), size = 6, fontface = "bold", color = "black") +
+  scale_fill_gradient(low = "white", high = "#2171b5") +
+  labs(
+    title = "Matriz de confusión - XGBoost con SMOTE (umbral 0.70)",
+    x = "Predicción del modelo",
+    y = "Valor real"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+```{r}
+
+# CÓDIGO OPCIÓN B – XGBoost con SMOTE aplicado antes del split
+
+# Cargar paquetes necesarios
+library(tidymodels)
+library(themis)
+library(xgboost)
+
+BBDD_Alvaro_Pedros_var35 <- readRDS("C:/Users/Alvaro/OneDrive/UFV/TFG/BBDD_Alvaro_Pedros_var35.rds")
+datos$MARCA_IMP90_12 <- as.factor(datos$MARCA_IMP90_12)
+
+# Aplicar SMOTE a todos los datos antes del split
+receta_b <- recipe(MARCA_IMP90_12 ~ ., data = datos) %>%
+  step_smote(MARCA_IMP90_12)
+
+receta_b_prep <- prep(receta_b)
+datos_balanceados <- bake(receta_b_prep, new_data = NULL)
+
+# Split con datos ya balanceados
+set.seed(123)
+split_b <- initial_split(datos_balanceados, prop = 0.8, strata = MARCA_IMP90_12)
+train_b <- training(split_b)
+test_b <- testing(split_b)
+
+# Modelo XGBoost
+modelo_xgb_b <- boost_tree(
+  trees = 1000,
+  tree_depth = 6,
+  learn_rate = 0.1,
+  loss_reduction = 0.0
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+
+# Workflow
+workflow_xgb_b <- workflow() %>%
+  add_model(modelo_xgb_b) %>%
+  add_formula(MARCA_IMP90_12 ~ .)
+
+# Entrenamiento
+set.seed(123)
+modelo_final_xgb_b <- fit(workflow_xgb_b, data = train_b)
+
+# Predicciones probabilísticas
+predicciones_prob_b <- predict(modelo_final_xgb_b, test_b, type = "prob")
+
+# Ajustar umbral a 0.70
+predicciones_clase_b <- ifelse(predicciones_prob_b$.pred_1 >= 0.70, "1", "0")
+predicciones_clase_b <- factor(predicciones_clase_b, levels = c("0", "1"))
+
+# Unir con variable real
+pred_test_b <- bind_cols(test_b, predicciones_prob_b) %>%
+  mutate(pred_070 = predicciones_clase_b)
+
+# Métricas
+metric_set(accuracy, recall, precision, f_meas, roc_auc)(
+  data = pred_test_b,
+  truth = MARCA_IMP90_12,
+  estimate = pred_070,
+  .pred_1
+)
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(yardstick)
+library(purrr)
+
+# Secuencia de umbrales
+umbral_seq <- seq(0.3, 0.7, by = 0.05)
+
+# Calcular métricas para cada umbral
+metricas_por_umbral <- map_dfr(umbral_seq, function(umbral) {
+  data_tmp <- pred_test_b %>%
+    mutate(pred_clase = factor(ifelse(.pred_1 >= umbral, "1", "0"), levels = c("0", "1")))
+  
+  met <- metric_set(accuracy, recall, precision, f_meas)
+  met(data_tmp, truth = MARCA_IMP90_12, estimate = pred_clase) %>%
+    mutate(umbral = umbral)
+})
+
+# Graficar evolución de métricas
+ggplot(metricas_por_umbral, aes(x = umbral, y = .estimate, color = .metric)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  labs(title = "Evolución de métricas por umbral - XGBoost SMOTE (opción B)",
+       x = "Umbral de decisión", y = "Valor de la métrica",
+       color = "Métrica") +
+  theme_minimal()
+
+
+```
+
+```{r}
+# Crear matriz de confusión con umbral 0.60
+library(tibble)
+library(ggplot2)
+
+# Crear tibble con métricas manuales del modelo XGBoost SMOTE
+library(tibble)
+
+tibble(
+  .metric = c("accuracy", "recall", "precision", "f_meas", "roc_auc"),
+  .estimator = "binary",
+  .estimate = c(0.9989, 0.9995, 0.9985, 0.9989, 0.00001)
+)
+
+matriz_conf_060 <- conf_mat(pred_test_b, truth = MARCA_IMP90_12, estimate = pred_060)
+
+# Convertir a tibble para graficar
+df_matriz_conf_060 <- as_tibble(matriz_conf_060$table)
+
+# Graficar la matriz de confusión
+ggplot(df_matriz_conf_060, aes(x = Prediction, y = Truth, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n), size = 6, fontface = "bold", color = "black") +
+  scale_fill_gradient(low = "white", high = "#2171b5") +
+  labs(
+    title = "Matriz de confusión - XGBoost SMOTE (opción B, umbral 0.60)",
+    x = "Predicción del modelo",
+    y = "Valor real"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
