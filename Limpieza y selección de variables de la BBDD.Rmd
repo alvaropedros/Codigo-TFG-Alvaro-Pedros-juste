@@ -1,0 +1,78 @@
+---
+title: "Limpieza BBDD"
+output: html_document
+date: "2025-01-09"
+---
+
+```{r}
+# Cargar paquetes necesarios
+library(tidyverse)
+library(janitor)
+library(readr)
+library(lubridate)
+library(naniar)
+library(corrr)
+
+# 1. Cargar datos
+datos <- read_csv("BBDD_original.csv")
+
+# 2. Eliminar columnas innecesarias
+datos <- datos %>% 
+  select(-starts_with("ID"), -contains("fecha"), -contains("nombre"), -contains("nif"), -contains("documento"))
+
+# 3. Eliminar columnas con más del 50% de valores NA
+na_pct <- sapply(datos, function(x) mean(is.na(x)))
+datos <- datos[, na_pct <= 0.5]
+
+# 4. Eliminar columnas con un único valor (sin variabilidad)
+var_unica <- sapply(datos, function(x) length(unique(x)) == 1)
+datos <- datos[, !var_unica]
+
+# 5. Convertir tipos de datos
+datos <- datos %>% 
+  mutate(across(where(is.character), as.factor)) %>%
+  mutate(across(where(is.logical), as.numeric)) %>%
+  mutate(across(where(is.POSIXct), ~ as.numeric(difftime(., min(., na.rm = TRUE), units = "days"))))
+
+# 6. Imputar valores extremos (-9999, 9999) con la mediana de la variable
+datos <- datos %>% mutate(across(
+  everything(), 
+  ~ ifelse(. %in% c(-9999, 9999), median(.[!. %in% c(-9999, 9999)], na.rm = TRUE), .)
+))
+
+# 7. Eliminar variables categóricas con demasiadas categorías (ej. > 50 niveles)
+datos <- datos %>% select(where(~ !is.factor(.) || nlevels(.) <= 50))
+
+# 8. Seleccionar variable objetivo
+# Asegurarse de que está presente y en formato adecuado
+datos$MARCA_IMP90_12 <- as.factor(datos$MARCA_IMP90_12)
+
+# 9. Eliminar variables con alta correlación interna (> 0.9)
+# Primero seleccionar numéricas
+datos_num <- datos %>% select(where(is.numeric))
+# Calcular matriz de correlación
+cor_matrix <- correlate(datos_num)
+# Eliminar correlaciones fuertes
+high_cor <- cor_matrix %>%
+  stretch() %>%
+  filter(abs(r) > 0.9, x != y)
+
+# Eliminar una de cada par de variables correlacionadas
+vars_to_remove <- unique(high_cor$y)
+datos <- datos %>% select(-one_of(vars_to_remove))
+
+# 10. Selección de las 50 variables más correlacionadas con la variable objetivo
+library(FSelector)
+# Convertimos variable objetivo a numérica temporalmente
+datos_corr <- datos %>% mutate(MARCA_IMP90_12 = as.numeric(MARCA_IMP90_12))
+# Calculamos importancia de variables con information gain
+weights <- information.gain(MARCA_IMP90_12 ~ ., data = datos_corr)
+top_vars <- names(sort(weights$attr_importance, decreasing = TRUE))[1:50]
+# Filtramos el dataset con esas variables + objetivo
+datos_final <- datos %>% select(all_of(top_vars), MARCA_IMP90_12)
+
+# 11. Guardar la base final como RDS
+saveRDS(datos_final, "BBDD_TFG_Álvaro_Pedrós_35var.rds")
+
+```
+
